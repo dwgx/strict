@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "strict",
+  "version": "${version}",
+  "name": "Strict Mod",
+  "description": "一个增强 Minecraft 服务器安全性的 Fabric 模组，通过模组验证、加密令牌认证和访问控制，确保只有授权玩家和批准模组可加入。支持私密模式、黑名单管理和详细日志。",
+  "authors": [
+    "dwgx1337"
+  ],
+  "contact": {
+    "homepage": "https://example.com/strict-mod",
+    "issues": "https://github.com/dwgx1337/strict-mod/issues",
+    "sources": "https://github.com/dwgx1337/strict-mod"
+  },
+  "license": "MIT",
+  "icon": "assets/strict/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "fabric-datagen": [
+      "com.strict.client.MainDataGenerator"
+    ],
+    "client": [
+      "com.strict.client.MainClient"
+    ],
+    "main": [
+      "com.strict.Main"
+    ]
+  },
+  "mixins": [
+    "strict.mixins.json",
+    {
+      "config": "strict.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "fabric": "*",
+    "minecraft": "${minecraft_version}"
+  }
+}

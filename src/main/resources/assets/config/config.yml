@@ -1,0 +1,14 @@
+privateMode: false
+logEnabled: true
+secretKey: "dwgx1337"
+secretKeyHash: ""
+allowedMods:
+  - minecraft
+  - strict
+  - fabricloader
+  - java
+  - mixinextras
+  - org_yaml_snakeyaml
+excludedMods: []
+allowFabricMods: true
+blacklistedPlayers: []
