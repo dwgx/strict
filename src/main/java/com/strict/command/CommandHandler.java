@@ -47,6 +47,12 @@ public class CommandHandler {
                                 .executes(context -> {
                                     String playerName = StringArgumentType.getString(context, "player");
                                     if (!ModCheckModule.getPendingPlayers().contains(playerName)) {
+
+                                        context.getSource().sendMessage(Text.literal(String.valueOf(ModCheckModule.getPendingPlayers().size())));
+                                        for (String sz : ModCheckModule.getPendingPlayers()) {
+                                            context.getSource().sendMessage(Text.literal("运作了"));
+                                            context.getSource().sendMessage(Text.literal(sz));
+                                        }
                                         context.getSource().sendError(Text.literal("玩家 " + playerName + " 未在等待列表"));
                                         return 0;
                                     }

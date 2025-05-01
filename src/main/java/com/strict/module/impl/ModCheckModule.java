@@ -37,9 +37,11 @@ public class ModCheckModule implements Module {
     public static final Set<String> allowedPlayers = new HashSet<>();
     private static final Map<String, PlayerJoinData> playerJoinDataMap = new HashMap<>();
     private static final Map<String, Long> usedNonces = new ConcurrentHashMap<>();
+    private static final Map<String, Long> pendingTimestamps = new ConcurrentHashMap<>();
     private static final CheckPayloadCodec PAYLOAD_CODEC = new CheckPayloadCodec();
     private static final long TIMESTAMP_THRESHOLD = 300_000; // 5 minutes
     private static final long NONCE_EXPIRY = 600_000; // 10 minutes
+    private static final long PENDING_TIMEOUT = 3_600_000; // 1 hour
 
     public record CheckPayload(String token, String computerName, List<String> modList) implements CustomPayload {
         public static final CustomPayload.Id<CheckPayload> ID = new CustomPayload.Id<>(CHECK_CHANNEL);
@@ -70,6 +72,8 @@ public class ModCheckModule implements Module {
     private static void cleanupExpiredNonces() {
         long currentTime = System.currentTimeMillis();
         usedNonces.entrySet().removeIf(entry -> currentTime - entry.getValue() > NONCE_EXPIRY);
+        pendingTimestamps.entrySet().removeIf(entry -> currentTime - entry.getValue() > PENDING_TIMEOUT);
+        pendingPlayers.removeIf(player -> !pendingTimestamps.containsKey(player));
     }
 
     @Override
@@ -91,11 +95,11 @@ public class ModCheckModule implements Module {
         ServerLoginNetworking.registerGlobalReceiver(CHECK_CHANNEL, (server, handler, understood, buf, synchronizer, responseSender) -> {
             cleanupExpiredNonces();
             if (!understood) {
-                handler.disconnect(Text.literal("请安装 Strict 模组"));
+                handler.disconnect(Text.literal("请安装 Strict 模组").formatted(Formatting.RED));
                 return;
             }
             if (buf == null || buf.readableBytes() == 0) {
-                handler.disconnect(Text.literal("客户端未发送有效数据包"));
+                handler.disconnect(Text.literal("客户端未发送有效数据包").formatted(Formatting.RED));
                 return;
             }
 
@@ -103,21 +107,23 @@ public class ModCheckModule implements Module {
             try {
                 payload = PAYLOAD_CODEC.decode(buf);
             } catch (Exception e) {
-                handler.disconnect(Text.literal("数据包解码失败: " + e.getMessage()));
+                handler.disconnect(Text.literal("数据包解码失败: " + e.getMessage()).formatted(Formatting.RED));
                 return;
             }
 
             String token = payload.token();
             String computerName = payload.computerName();
             List<String> modList = payload.modList();
-            System.out.println("客户端模组列表: " + modList);
+            if (ConfigManager.getConfig().isLogEnabled()) {
+                System.out.println("客户端模组列表: " + modList);
+            }
 
             String tokenData;
             try {
                 SecretKey aesKey = generateAesKey(ConfigManager.getConfig().getSecretKey());
                 tokenData = CryptoUtils.decryptAES_GCM(token, aesKey);
             } catch (Exception e) {
-                handler.disconnect(Text.literal("令牌解密失败: " + e.getMessage()));
+                handler.disconnect(Text.literal("令牌解密失败: " + e.getMessage()).formatted(Formatting.RED));
                 return;
             }
 
@@ -125,7 +131,7 @@ public class ModCheckModule implements Module {
             try {
                 tokenJson = JsonParser.parseString(tokenData).getAsJsonObject();
             } catch (Exception e) {
-                handler.disconnect(Text.literal("令牌格式无效: " + e.getMessage()));
+                handler.disconnect(Text.literal("令牌格式无效: " + e.getMessage()).formatted(Formatting.RED));
                 return;
             }
 
@@ -141,12 +147,12 @@ public class ModCheckModule implements Module {
             String tokenPlain = tokenPlainJson.toString();
 
             if (!CryptoUtils.verifyToken(receivedHash, tokenPlain, ConfigManager.getConfig().getSecretKey())) {
-                handler.disconnect(Text.literal("令牌校验失败"));
+                handler.disconnect(Text.literal("令牌校验失败").formatted(Formatting.RED));
                 return;
             }
 
             if (usedNonces.containsKey(nonce) || Math.abs(System.currentTimeMillis() - timestamp) > TIMESTAMP_THRESHOLD) {
-                handler.disconnect(Text.literal("令牌已过期或重复使用"));
+                handler.disconnect(Text.literal("令牌已过期或重复使用").formatted(Formatting.RED));
                 return;
             }
             usedNonces.put(nonce, System.currentTimeMillis());
@@ -164,42 +170,76 @@ public class ModCheckModule implements Module {
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
             String playerName = handler.getPlayer().getGameProfile().getName();
             PlayerJoinData tempData = playerJoinDataMap.get(playerName);
+
+            // Check if validation data exists
             if (tempData == null) {
-                handler.disconnect(Text.literal("未收到验证数据"));
+                handler.disconnect(Text.literal("未收到验证数据").formatted(Formatting.RED));
                 return;
             }
 
             String uuid = handler.getPlayer().getGameProfile().getId().toString();
             tempData.setUuid(uuid);
 
-            if (ConfigManager.getConfig().getBlacklistedPlayers().contains(uuid) || ConfigManager.getConfig().getBlacklistedPlayers().contains(tempData.computerName)) {
-                handler.disconnect(Text.literal("你已被服务器拉黑"));
+            // Check blacklist
+            if (ConfigManager.getConfig().getBlacklistedPlayers().contains(uuid) ||
+                    ConfigManager.getConfig().getBlacklistedPlayers().contains(tempData.computerName)) {
+                handler.disconnect(Text.literal("你已被服务器拉黑").formatted(Formatting.RED));
                 return;
             }
 
+            // Check for illegal mods
             Set<String> mods = tempData.mods;
             Set<String> illegalMods = getIllegalMods(mods);
             if (!illegalMods.isEmpty()) {
                 String illegalModsList = String.join(", ", illegalMods);
                 usedNonces.remove(tempData.getNonce());
-                handler.disconnect(Text.literal("非法模组: " + illegalModsList + ". 请移除这些模组后重试。"));
+                handler.disconnect(Text.literal("检测到非法模组: " + illegalModsList + "。请移除后重试。").formatted(Formatting.RED));
                 return;
             }
 
-            if (ConfigManager.getConfig().isPrivateMode() && !handler.getPlayer().hasPermissionLevel(4) && !allowedPlayers.contains(playerName)) {
-                pendingPlayers.add(playerName);
-                handler.disconnect(Text.literal("等待管理员审批"));
-                Text acceptText = Text.literal("[同意]").setStyle(Style.EMPTY.withColor(Formatting.GREEN).withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/strict accept " + playerName)));
-                Text rejectText = Text.literal("[拒绝]").setStyle(Style.EMPTY.withColor(Formatting.RED).withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/strict reject " + playerName)));
-                Text blacklistText = Text.literal("[拉黑]").setStyle(Style.EMPTY.withColor(Formatting.DARK_GRAY).withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/strict blacklist add " + playerName)));
+            // Handle private mode
+            if (ConfigManager.getConfig().isPrivateMode() &&
+                    !handler.getPlayer().hasPermissionLevel(4) &&
+                    !allowedPlayers.contains(playerName)) {
+                // Add to pending players if not already pending
+                if (!pendingPlayers.contains(playerName)) {
+                    pendingPlayers.add(playerName);
+                    pendingTimestamps.put(playerName, System.currentTimeMillis());
+                }
+
+                // Create approval broadcast
+                Text acceptText = Text.literal("[同意]")
+                        .setStyle(Style.EMPTY.withColor(Formatting.GREEN)
+                                .withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/strict accept " + playerName)));
+                Text rejectText = Text.literal("[拒绝]")
+                        .setStyle(Style.EMPTY.withColor(Formatting.RED)
+                                .withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/strict reject " + playerName)));
+                Text blacklistText = Text.literal("[拉黑]")
+                        .setStyle(Style.EMPTY.withColor(Formatting.DARK_GRAY)
+                                .withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/strict blacklist add " + playerName)));
                 Text message = Text.literal("玩家 " + playerName + " 请求加入，计算机名称: " + tempData.computerName + ", UUID: " + uuid + " ")
-                        .append(acceptText).append(Text.literal(" ")).append(rejectText).append(Text.literal(" ")).append(blacklistText);
-                server.getPlayerManager().broadcast(message, false);
-                System.out.println("广播审批消息: " + message.getString()); // 调试日志
-            } else {
-                allowPlayer(server, handler.getPlayer(), tempData.clientType, tempData.computerName);
-                allowedPlayers.remove(playerName);
+                        .append(acceptText).append(Text.literal(" "))
+                        .append(rejectText).append(Text.literal(" "))
+                        .append(blacklistText);
+
+                // Broadcast to admins only
+                server.getPlayerManager().getPlayerList().stream()
+                        .filter(p -> p.hasPermissionLevel(4))
+                        .forEach(p -> p.sendMessage(message, false));
+
+                if (ConfigManager.getConfig().isLogEnabled()) {
+                    System.out.println("玩家 " + playerName + " 等待审批，UUID: " + uuid + ", 计算机名称: " + tempData.computerName);
+                    System.out.println("广播审批消息: " + message.getString());
+                }
+
+                // Disconnect player with clear message
+                handler.disconnect(Text.literal("你的加入请求已提交，请等待管理员审批。").formatted(Formatting.YELLOW));
+                return;
             }
+
+            // Allow player to join
+            allowPlayer(server, handler.getPlayer(), tempData.clientType, tempData.computerName);
+            allowedPlayers.remove(playerName); // Clean up if previously approved
         });
 
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
@@ -208,7 +248,7 @@ public class ModCheckModule implements Module {
             if (tempData != null) {
                 usedNonces.remove(tempData.getNonce());
             }
-            pendingPlayers.remove(playerName);
+            // Do not remove from pendingPlayers here to allow approval after disconnect
             playerJoinDataMap.remove(playerName);
         });
 
@@ -217,6 +257,7 @@ public class ModCheckModule implements Module {
             ConfigManager.loadConfig();
             ServerLifecycleEvents.SERVER_STOPPING.register(srv -> {
                 pendingPlayers.clear();
+                pendingTimestamps.clear();
                 playerJoinDataMap.clear();
                 usedNonces.clear();
                 ConfigManager.saveConfig();
@@ -275,10 +316,12 @@ public class ModCheckModule implements Module {
         }
         Formatting[] colors = {Formatting.AQUA, Formatting.GREEN, Formatting.YELLOW, Formatting.LIGHT_PURPLE};
         Formatting randomColor = colors[new Random().nextInt(colors.length)];
-        String message = String.format("§%s玩家 %s 使用 %s 客户端加入，计算机名称: %s", randomColor.getName(), player.getName().getString(), clientType, computerName);
-        Text text = Text.literal(message);
+        String message = String.format("玩家 %s 使用 %s 客户端加入，计算机名称: %s", player.getName().getString(), clientType, computerName);
+        Text text = Text.literal(message).formatted(randomColor);
         server.getPlayerManager().broadcast(text, false);
-        System.out.println("广播玩家加入消息: " + message); // 调试日志
+        if (ConfigManager.getConfig().isLogEnabled()) {
+            System.out.println("广播玩家加入消息: " + message);
+        }
     }
 
     public static boolean isPrivateMode() {
